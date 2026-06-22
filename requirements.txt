@@ -1,0 +1,11 @@
+# Direct dependencies used by the research notebooks.
+astropy
+astroquery
+corner
+emcee
+ipykernel
+matplotlib
+numpy
+pandas
+scipy
+tqdm
