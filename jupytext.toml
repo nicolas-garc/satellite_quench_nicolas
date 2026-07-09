@@ -1,0 +1,3 @@
+# jupytext.toml
+formats = "notebooks///ipynb,notebooks///py:percent"
+
