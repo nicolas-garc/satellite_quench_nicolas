@@ -18,6 +18,8 @@
 # I added a function at the bottom where given any combination of filters you can plot the distribution of satellite angles and the quench fraction for Saga and Elves
 #
 # **Note:** This notebook includes an `INCLUDE_TNG` toggle (see the Setup section) that controls whether the TNG100 simulation comparison is run. It defaults to `False` so the notebook executes cleanly end-to-end using only the SAGA and ELVES observational data. Set it to `True` to also run the TNG100 cells (this additionally requires the TNG100 MCMC fit parameters described in the note near the MCMC section).
+#
+# > **Branch note (`binomial_likelihood_saga_elves`):** the SAGA and ELVES MCMC fits on this branch use a **binomial** per-bin likelihood on $(n_i, k_i)$ instead of the Gaussian-with-jitter likelihood from `main`/`final_analysis`. Filters, cuts, bin count, walker count, step count, and burn-in are all unchanged; only the likelihood function is swapped. The TNG branch is untouched (still uses the Gaussian BIC). See `likelihood_comparison.ipynb` on `final_analysis` for the head-to-head comparison of the two forms.
 
 # %% [markdown]
 # ## Setup
@@ -1065,35 +1067,39 @@ else:
 
 # %%
 # Log-likelihood / prior / posterior for the sinusoidal quenched-fraction model,
-# shared by the SAGA, ELVES (and optional TNG100) MCMC fits below.
-def calculate_log_likelihood(theta, bin_centers, f_q, sigma_i):
-
-    a, b, f = theta
-
-    # Compute total variance
-    s_i = sigma_i**2 + (np.exp(f))**2
-
-    # Model prediction
-    f_model = a + b * np.cos(2 * np.radians(bin_centers))
-
-    # Residuals and log-likelihood
-    residuals = (f_q - f_model)**2 / s_i
-    log_likelihood = -0.5 * np.sum(residuals + np.log(2 * np.pi * s_i))
-    
-    return log_likelihood
+# shared by the SAGA and ELVES MCMC fits below.
+#
+# Binomial likelihood variant (this branch): treats each angular bin's
+# quenched count k_i as Binomial(n_i, p_i) with p_i = a + b*cos(2*theta_i).
+# No jitter parameter -- the two free parameters are (a, b).
+#
+# Rationale: some angular bins have small n_i (as low as ~11 in SAGA), and
+# the Gaussian-with-jitter form used in Navarro et al. 2021 relies on the
+# normal approximation to the binomial per bin, which breaks down at small
+# n or when p is near 0/1. Modelling k_i as Binomial(n_i, p_i) directly is
+# exact and removes that approximation. See likelihood_comparison.ipynb on
+# branch final_analysis for the comparison between the two forms.
+def calculate_log_likelihood(theta, bin_centers, n_i, k_i):
+    a, b = theta
+    p_i = a + b * np.cos(2 * np.radians(bin_centers))
+    if np.any(p_i <= 0) or np.any(p_i >= 1):
+        return -np.inf
+    # clip is a numerical guard for logpmf; the (0, 1) reject above is the
+    # real prior on the p range
+    p_i = np.clip(p_i, 1e-6, 1 - 1e-6)
+    return np.sum(scipy.stats.binom.logpmf(k_i, n_i, p_i))
 
 def log_prior(theta):
-    a, b, f = theta
-    if 0 < a < 1 and -1 < b < 1 and -10 < f < 2:
+    a, b = theta
+    if 0 < a < 1 and -1 < b < 1:
         return 0.0
     return -np.inf
 
-def calculate_log_probability(theta, bin_centers, f_q, sigma_i):
-    
+def calculate_log_probability(theta, bin_centers, n_i, k_i):
     log_prior_val = log_prior(theta)
     if not np.isfinite(log_prior_val):
         return -np.inf
-    log_likelihood = calculate_log_likelihood(theta, bin_centers, f_q, sigma_i)
+    log_likelihood = calculate_log_likelihood(theta, bin_centers, n_i, k_i)
     return log_prior_val + log_likelihood
 
 
@@ -1105,7 +1111,7 @@ def calculate_log_probability(theta, bin_centers, f_q, sigma_i):
 # - **`run_mcmc_fit`** -- runs the sampler and returns both the raw sampler (needed for trace/burn-in diagnostics) and the flattened, burn-in-discarded posterior samples.
 # - **`plot_trace_with_burnin`** -- walker chains for each parameter vs. step, with the discarded burn-in region shaded.
 # - **`plot_log_prob_with_burnin`** -- the log-probability (log-likelihood + log-prior) of each walker vs. step, again with the burn-in region shaded, so you can visually confirm the chains have converged before the burn-in cutoff.
-# - **`plot_corner`** -- a `corner` posterior plot for $(a, b, \ln f)$. Accepts a dict of `{label: samples}` so multiple populations (e.g. SAGA vs. ELVES) can be overlaid on the same corner plot.
+# - **`plot_corner`** -- a `corner` posterior plot for $(a, b)$ (this branch uses a 2-parameter binomial likelihood). Accepts a dict of `{label: samples}` so multiple populations (e.g. SAGA vs. ELVES) can be overlaid on the same corner plot.
 #
 
 # %%
@@ -1115,17 +1121,17 @@ def calculate_log_probability(theta, bin_centers, f_q, sigma_i):
 # SAGA/ELVES fit below and the per-case fits later in the notebook.
 # ---------------------------------------------------------------------------
 
-PARAM_LABELS = [r"$a$", r"$b$", r"$\ln f$"]
+PARAM_LABELS = [r"$a$", r"$b$"]
 _DIAG_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#8c564b"]
 
 
-def run_mcmc_fit(bin_centers, fq_mean, fq_std, initial_guess=(0.7, 0.025, -3),
+def run_mcmc_fit(bin_centers, n_i, k_i, initial_guess=(0.7, 0.025),
                   n_walkers=20, n_steps=10_000, burnin=1000, seed=None, progress=True):
     """
     Run the emcee sampler for the sinusoidal quenched-fraction model
-    f_q(theta) = a + b*cos(2*theta) and return both the raw sampler (for
-    trace/burn-in diagnostics) and the flattened, burn-in-discarded
-    posterior samples.
+    p(theta) = a + b*cos(2*theta) with a binomial per-bin likelihood
+    (this branch); returns both the raw sampler (for trace/burn-in
+    diagnostics) and the flattened, burn-in-discarded posterior samples.
     """
     rng = np.random.default_rng(seed)
     n_dim = len(initial_guess)
@@ -1133,7 +1139,7 @@ def run_mcmc_fit(bin_centers, fq_mean, fq_std, initial_guess=(0.7, 0.025, -3),
 
     sampler = emcee.EnsembleSampler(
         n_walkers, n_dim, calculate_log_probability,
-        args=(bin_centers, fq_mean, fq_std),
+        args=(bin_centers, n_i, k_i),
     )
     sampler.run_mcmc(pos, n_steps, progress=progress)
 
@@ -1368,35 +1374,43 @@ assert np.allclose(bin_centers, angle_array), (
     "just computed -- check both use the same bins/angle_range before trusting this fit."
 )
 
-# Guard against any bin with too few galaxies to bootstrap (bootstrap_90_
-# observational_binned leaves those as NaN). Without this, one NaN bin makes
-# the log-likelihood NaN for every parameter value, which emcee rejects
-# outright. The per-case fits later in the notebook already guard this way;
-# this makes the main fit consistent with them.
-valid_saga  = np.isfinite(fq_mean_saga)  & np.isfinite(fq_std_saga)  & (fq_std_saga  > 0)
-valid_elves = np.isfinite(fq_mean_elves) & np.isfinite(fq_std_elves) & (fq_std_elves > 0)
+# Binomial fit needs per-bin counts (n_i, k_i), not the bootstrap-mean and
+# std. fq_mean/fq_std remain in use for the error bars on the plot below.
+_edges_main = np.linspace(0, 90, 19)
+n_saga_bin,  _ = np.histogram(saga_90, bins=_edges_main)
+k_saga_bin,  _ = np.histogram(saga_90[saga_quenched.astype(bool)], bins=_edges_main)
+n_elves_bin, _ = np.histogram(elves_90_correct, bins=_edges_main)
+k_elves_bin, _ = np.histogram(np.asarray(elves_90_correct)[elves_quenched.astype(bool)],
+                              bins=_edges_main)
+
+# Drop bins with no galaxies (n_i == 0). The per-case fits later in the
+# notebook use the same guard.
+valid_saga  = n_saga_bin  > 0
+valid_elves = n_elves_bin > 0
 if not valid_saga.all():
-    print(f"SAGA: dropping {(~valid_saga).sum()} bin(s) with too few galaxies to bootstrap.")
+    print(f"SAGA: dropping {(~valid_saga).sum()} bin(s) with no satellites.")
 if not valid_elves.all():
-    print(f"ELVES: dropping {(~valid_elves).sum()} bin(s) with too few galaxies to bootstrap.")
+    print(f"ELVES: dropping {(~valid_elves).sum()} bin(s) with no satellites.")
 
 # SAGA -----------------------------------------------------------------
-fit_saga = run_mcmc_fit(angle_array[valid_saga], fq_mean_saga[valid_saga], fq_std_saga[valid_saga],
-                         initial_guess=[0.7, 0.025, -3], n_steps=10_000, burnin=1000)
+fit_saga = run_mcmc_fit(angle_array[valid_saga],
+                         n_saga_bin[valid_saga], k_saga_bin[valid_saga],
+                         initial_guess=[0.7, 0.025], n_steps=10_000, burnin=1000)
 
-a_saga, b_saga, f_saga = fit_saga["mean_params"]
-a_saga_std, b_saga_std, f_saga_std = fit_saga["std_params"]
+a_saga, b_saga = fit_saga["mean_params"]
+a_saga_std, b_saga_std = fit_saga["std_params"]
 print(f"SAGA:  a = {a_saga:.3f} +/- {a_saga_std:.3f}, "
-      f"b = {b_saga:.3f} +/- {b_saga_std:.3f}, ln f = {f_saga:.2f} +/- {f_saga_std:.2f}")
+      f"b = {b_saga:.3f} +/- {b_saga_std:.3f}   [binomial]")
 
 # ELVES ------------------------------------------------------------------
-fit_elves = run_mcmc_fit(angle_array[valid_elves], fq_mean_elves[valid_elves], fq_std_elves[valid_elves],
-                          initial_guess=[0.7, 0.025, -3], n_steps=10_000, burnin=1000)
+fit_elves = run_mcmc_fit(angle_array[valid_elves],
+                          n_elves_bin[valid_elves], k_elves_bin[valid_elves],
+                          initial_guess=[0.7, 0.025], n_steps=10_000, burnin=1000)
 
-a_elves, b_elves, f_elves = fit_elves["mean_params"]
-a_elves_std, b_elves_std, f_elves_std = fit_elves["std_params"]
+a_elves, b_elves = fit_elves["mean_params"]
+a_elves_std, b_elves_std = fit_elves["std_params"]
 print(f"ELVES: a = {a_elves:.3f} +/- {a_elves_std:.3f}, "
-      f"b = {b_elves:.3f} +/- {b_elves_std:.3f}, ln f = {f_elves:.2f} +/- {f_elves_std:.2f}")
+      f"b = {b_elves:.3f} +/- {b_elves_std:.3f}   [binomial]")
 
 # --- Diagnostics: walker trace (with burn-in), log-probability (with
 #     burn-in), and corner plot, SAGA and ELVES overlaid -------------------
@@ -1696,22 +1710,31 @@ def run_case_combined(case_name, CASES):
     # ===== Bottom: Quenched fraction + MCMC sinusoidal fit, per group =====
     fits = {}
     for label, color, theta, q in groups:
+        # Bootstrap fq/fe are still computed -- only for the plotted error
+        # bars; the binomial fit uses per-bin (n_i, k_i) instead.
         bc, fq, fe = bootstrap_90_observational_binned(theta, q, N=Nboot, bins=bins, angle_range=(0, 90))
         ax_bot.errorbar(bc, fq, yerr=fe, fmt="o", ms=4, capsize=3, color=color, label=label)
 
-        valid = np.isfinite(fq) & np.isfinite(fe) & (fe > 0)
+        edges_case = np.linspace(0, 90, bins + 1)
+        theta_arr = np.asarray(theta)
+        q_arr = np.asarray(q, dtype=float)
+        n_i_case, _ = np.histogram(theta_arr, bins=edges_case)
+        k_i_case, _ = np.histogram(theta_arr[q_arr > 0.5], bins=edges_case)
+
+        valid = n_i_case > 0
         if valid.sum() < 3:
             print(f"  [skip MCMC] case '{case_name}' / '{label}': "
                   f"fewer than 3 usable bins ({valid.sum()}).")
             continue
 
-        a0 = float(np.clip(np.nanmean(fq[valid]), 0.05, 0.95))
-        fit = run_mcmc_fit(bc[valid], fq[valid], fe[valid],
-                            initial_guess=[a0, 0.02, -3],
+        a0 = float(np.clip(np.nanmean(fq[valid]) if np.any(np.isfinite(fq[valid])) else 0.5,
+                           0.05, 0.95))
+        fit = run_mcmc_fit(bc[valid], n_i_case[valid], k_i_case[valid],
+                            initial_guess=[a0, 0.02],
                             n_steps=mcmc_steps, burnin=mcmc_burnin, progress=False)
         fits[label] = fit
 
-        a_fit, b_fit, _ = fit["mean_params"]
+        a_fit, b_fit = fit["mean_params"]
         ax_bot.plot(_THETA_DEG_FINE, a_fit + b_fit * np.cos(2 * _THETA_FINE),
                     color=color, lw=2, ls="--")
 
@@ -1740,10 +1763,10 @@ def run_case_combined(case_name, CASES):
         plt.show()
 
         for label, fit in fits.items():
-            a_f, b_f, f_f = fit["mean_params"]
-            a_fs, b_fs, f_fs = fit["std_params"]
+            a_f, b_f = fit["mean_params"]
+            a_fs, b_fs = fit["std_params"]
             print(f"  [{case_name}] {label}: a = {a_f:.3f} +/- {a_fs:.3f}, "
-                  f"b = {b_f:.3f} +/- {b_fs:.3f}, ln f = {f_f:.2f} +/- {f_fs:.2f}")
+                  f"b = {b_f:.3f} +/- {b_fs:.3f}   [binomial]")
     else:
         print(f"  [{case_name}] no population had enough bins for an MCMC fit.")
 
@@ -1755,7 +1778,7 @@ def run_case_combined(case_name, CASES):
 # Define several selection-cut cases and run the combined SAGA+ELVES comparison
 # (angle distribution + quenched fraction + MCMC sinusoidal fit) for each one.
 # Each case now also produces a walker-trace plot, a log-probability plot
-# (both with the burn-in region shaded), and a corner plot of the (a, b, ln f)
+# (both with the burn-in region shaded), and a corner plot of the (a, b)
 # posterior -- one population overlaid per line in the case (e.g. SAGA vs.
 # ELVES, or ELVES early vs. late).
 CASES = {
@@ -1962,11 +1985,48 @@ def BIC(x_data, y_data, y_err, a_fit, b_fit, f_fit):
     else:
         print("From AIC, Sinusoid model preferred")
 
+def BIC_binomial(bin_centers_deg, n_i, k_i, a_fit, b_fit):
+    """Binomial-likelihood BIC/AIC for the sinusoid vs. constant comparison.
+    Matches the binomial likelihood used for the SAGA/ELVES fits above."""
+    mask = n_i > 0
+    bc = np.asarray(bin_centers_deg)[mask]
+    n = np.asarray(n_i)[mask]
+    k = np.asarray(k_i)[mask]
+
+    # sinusoid model
+    p_sin = np.clip(a_fit + b_fit * np.cos(2 * np.radians(bc)), 1e-6, 1 - 1e-6)
+    logL_sin = float(np.sum(scipy.stats.binom.logpmf(k, n, p_sin)))
+    n_data, k_sin = len(k), 2
+    bic_sin = k_sin * np.log(n_data) - 2 * logL_sin
+    aic_sin = 2 * k_sin - 2 * logL_sin
+    print("BIC Sinusoid Fit =", bic_sin)
+    print("AIC Sinusoid Fit =", aic_sin)
+
+    # constant model: MLE p = sum(k) / sum(n)
+    p_const = np.clip(np.sum(k) / np.sum(n), 1e-6, 1 - 1e-6)
+    logL_const = float(np.sum(scipy.stats.binom.logpmf(k, n, np.full_like(p_sin, p_const))))
+    k_const = 1
+    bic_const = k_const * np.log(n_data) - 2 * logL_const
+    aic_const = 2 * k_const - 2 * logL_const
+    print("BIC Constant Fit =", bic_const)
+    print("AIC Constant Fit =", aic_const)
+
+    print('Delta BIC =', np.abs(bic_const - bic_sin))
+    print('Delta AIC =', np.abs(aic_const - aic_sin))
+    if bic_const < bic_sin:
+        print("From BIC, Constant model preferred")
+    else:
+        print("From BIC, Sinusoid model preferred")
+    if aic_const < aic_sin:
+        print("From AIC, Constant model preferred")
+    else:
+        print("From AIC, Sinusoid model preferred")
+
 print('ELVES:')
-BIC(angle_array, fq_mean_elves, fq_std_elves, a_elves, b_elves, f_elves)
+BIC_binomial(angle_array, n_elves_bin, k_elves_bin, a_elves, b_elves)
 print(' ')
 print('SAGA:')
-BIC(angle_array, fq_mean_saga, fq_std_saga, a_saga, b_saga, f_saga)
+BIC_binomial(angle_array, n_saga_bin, k_saga_bin, a_saga, b_saga)
 print(' ')
 
 if INCLUDE_TNG:
