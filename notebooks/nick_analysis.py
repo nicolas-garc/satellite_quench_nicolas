@@ -1789,7 +1789,55 @@ CASES = {
         "elves_early_type": 'all',   # 'all'/'none' (combined), 'split' (early+late separately), or True/False
         "bins": 15,
         "bootstrap_N": 10000,
-    }
+    },
+    "incl0_bins3": {
+        "incl_min": 0,
+        "saga_samples": ["gold", "silver"],
+        "saga_r200": True,
+        "elves_early_type": 'all',
+        "bins": 3,
+        "bootstrap_N": 10000,
+    },
+    "incl0_bins7": {
+        "incl_min": 0,
+        "saga_samples": ["gold", "silver"],
+        "saga_r200": True,
+        "elves_early_type": 'all',
+        "bins": 7,
+        "bootstrap_N": 10000,
+    },
+    "incl0_bins10": {
+        "incl_min": 0,
+        "saga_samples": ["gold", "silver"],
+        "saga_r200": True,
+        "elves_early_type": 'all',
+        "bins": 10,
+        "bootstrap_N": 10000,
+    },
+    "incl0_bins15": {
+        "incl_min": 0,
+        "saga_samples": ["gold", "silver"],
+        "saga_r200": True,
+        "elves_early_type": 'all',
+        "bins": 15,
+        "bootstrap_N": 10000,
+    },
+    "incl0_bins18": {
+        "incl_min": 0,
+        "saga_samples": ["gold", "silver"],
+        "saga_r200": True,
+        "elves_early_type": 'all',
+        "bins": 18,
+        "bootstrap_N": 10000,
+    },
+    "all_samples_no_r200": {
+        "incl_min": 0,
+        "saga_samples": ["gold", "silver", "participation"],
+        "saga_r200": False,
+        "elves_early_type": 'all',
+        "bins": 10,
+        "bootstrap_N": 10000,
+    },
 }
 
 case_fits = {}  # case_name -> {population_label: fit_result_dict}
